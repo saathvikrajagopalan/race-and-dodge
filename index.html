@@ -1,0 +1,680 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>City Dodge Race</title>
+  <style>
+    :root {
+      color-scheme: dark;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(135deg, #10131a, #1f2734);
+      color: #f2f2f2;
+      font-family: Arial, Helvetica, sans-serif;
+      padding: 16px;
+    }
+
+    .game-shell {
+      width: min(100%, 380px);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .status {
+      min-height: 24px;
+      text-align: center;
+      font-size: 0.95rem;
+      color: #d9ebff;
+    }
+
+    .distance {
+      text-align: center;
+      font-size: 0.95rem;
+      color: #b7c7db;
+    }
+
+    canvas {
+      width: 100%;
+      height: auto;
+      border-radius: 14px;
+      border: 2px solid rgba(255,255,255,0.16);
+      background: #111827;
+      touch-action: none;
+      box-shadow: 0 12px 34px rgba(0, 0, 0, 0.35);
+    }
+
+    .controls {
+      display: flex;
+      justify-content: center;
+      gap: 12px;
+    }
+
+    button {
+      border: none;
+      border-radius: 999px;
+      padding: 10px 16px;
+      font-weight: 700;
+      color: #08111d;
+      background: #f9fbff;
+      cursor: pointer;
+      box-shadow: 0 6px 14px rgba(0, 0, 0, 0.22);
+    }
+
+    button:active {
+      transform: translateY(1px);
+    }
+
+    #restartBtn {
+      background: #4fe3c1;
+      color: #08231d;
+    }
+  </style>
+</head>
+<body>
+  <div class="game-shell">
+    <div id="status" class="status">Use arrows or A/D to switch lanes.</div>
+    <div id="distance" class="distance">Distance: 0m</div>
+    <canvas id="gameCanvas" width="360" height="480"></canvas>
+    <div class="controls">
+      <button id="leftBtn">←</button>
+      <button id="restartBtn">Restart</button>
+      <button id="rightBtn">→</button>
+    </div>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const statusEl = document.getElementById('status');
+    const distanceEl = document.getElementById('distance');
+    const leftBtn = document.getElementById('leftBtn');
+    const rightBtn = document.getElementById('rightBtn');
+    const restartBtn = document.getElementById('restartBtn');
+
+    const laneCount = 5;
+    const roadWidth = 280;
+    const roadX = (canvas.width - roadWidth) / 2;
+    const laneWidth = roadWidth / laneCount;
+    const finishDistance = 3000;
+    const playerY = canvas.height - 90;
+    const charWidth = 20;
+    const charHeight = 28;
+    const baseWorldSpeed = 180;
+
+    function clamp(value, min, max) {
+      return Math.max(min, Math.min(max, value));
+    }
+
+    function getLaneCenter(lane) {
+      return roadX + lane * laneWidth + laneWidth / 2;
+    }
+
+    function createSkyline() {
+      const left = [];
+      const right = [];
+      const segmentCount = 12;
+      for (let i = 0; i < segmentCount; i += 1) {
+        left.push(createBuilding(i, true));
+        right.push(createBuilding(i, false));
+      }
+      return { left, right };
+    }
+
+    function createBuilding(index, leftSide) {
+      const height = 70 + Math.random() * 120;
+      const width = 36 + Math.random() * 26;
+      const spacing = 32 + Math.random() * 10;
+      const y = -120 - index * spacing + Math.random() * 20;
+      const style = Math.random() > 0.45 ? 'office' : 'apartment';
+      const baseColor = style === 'office' ? '#4d5566' : '#9a694f';
+      return {
+        width,
+        height,
+        y,
+        x: leftSide ? 10 + Math.random() * 18 : canvas.width - 28 - Math.random() * 18,
+        color: baseColor,
+        style,
+        windows: []
+      };
+    }
+
+    function resetGame() {
+      const player = {
+        name: 'You',
+        color: '#41dd93',
+        lane: 2,
+        progress: 0,
+        alive: true,
+        baseSpeed: 150,
+        boostTimer: 0,
+        y: playerY,
+        width: charWidth,
+        height: charHeight,
+        wobble: 0
+      };
+
+      const rivals = [
+        { name: 'Rex', color: '#ff9f1c', lane: 0, progress: 0, alive: true, baseSpeed: 138, dodgeSkill: 0.4, y: playerY, width: charWidth, height: charHeight, wobble: 0 },
+        { name: 'Mira', color: '#4da3ff', lane: 1, progress: 0, alive: true, baseSpeed: 132, dodgeSkill: 0.7, y: playerY, width: charWidth, height: charHeight, wobble: 0 },
+        { name: 'Vio', color: '#b36dff', lane: 4, progress: 0, alive: true, baseSpeed: 128, dodgeSkill: 0.55, y: playerY, width: charWidth, height: charHeight, wobble: 0 }
+      ];
+
+      return {
+        player,
+        rivals,
+        obstacles: [],
+        pickups: [],
+        skyline: createSkyline(),
+        gameOver: false,
+        result: '',
+        distance: 0,
+        spawnTimer: 0.85,
+        pickupTimer: 2.5 + Math.random() * 1.6,
+        lastTime: 0,
+        roadOffset: 0,
+        worldSpeed: baseWorldSpeed
+      };
+    }
+
+    let state = resetGame();
+    let touchStartX = 0;
+    let touchStartY = 0;
+
+    function updateHud() {
+      if (state.gameOver) {
+        statusEl.textContent = state.result || 'Crashed.';
+      } else if (state.player.boostTimer > 0) {
+        statusEl.textContent = `Boost active: ${state.player.boostTimer.toFixed(1)}s`;
+      } else {
+        statusEl.textContent = 'Use arrows, A/D, or swipe to switch lanes.';
+      }
+      distanceEl.textContent = `Distance: ${Math.floor(state.player.progress)}m`;
+    }
+
+    function changeLane(delta) {
+      if (state.gameOver) return;
+      state.player.lane = clamp(state.player.lane + delta, 0, laneCount - 1);
+    }
+
+    function spawnObstacle() {
+      const lane = Math.floor(Math.random() * laneCount);
+      const types = [
+        { name: 'cone', color: '#ff7f2a', size: 14 },
+        { name: 'barrier', color: '#f7f7f7', size: 18 },
+        { name: 'box', color: '#8b5a2b', size: 16 },
+        { name: 'puddle', color: '#4e87ff', size: 16 }
+      ];
+      const type = types[Math.floor(Math.random() * types.length)];
+      state.obstacles.push({
+        lane,
+        y: -28,
+        size: type.size,
+        type: type.name,
+        color: type.color,
+        wobble: Math.random() * 0.5
+      });
+    }
+
+    function spawnPickup() {
+      const lane = Math.floor(Math.random() * laneCount);
+      state.pickups.push({
+        lane,
+        y: -28,
+        size: 14,
+        pulse: Math.random() * Math.PI * 2
+      });
+    }
+
+    function isLaneSafe(lane, yOffset) {
+      return !state.obstacles.some((obs) => obs.lane === lane && obs.y > yOffset - 120 && obs.y < yOffset + 80);
+    }
+
+    function updateRivals(dt) {
+      state.rivals.forEach((rival) => {
+        if (!rival.alive || state.gameOver) return;
+
+        rival.progress += rival.baseSpeed * dt;
+        rival.wobble += dt * 4;
+
+        if (rival.progress >= finishDistance && !state.gameOver) {
+          state.gameOver = true;
+          state.result = `${rival.name} wins!`;
+          return;
+        }
+
+        const ahead = state.obstacles.find((obs) => obs.lane === rival.lane && obs.y > rival.y - 180 && obs.y < rival.y + 60);
+        if (ahead) {
+          const canMoveLeft = rival.lane > 0 && isLaneSafe(rival.lane - 1, rival.y);
+          const canMoveRight = rival.lane < laneCount - 1 && isLaneSafe(rival.lane + 1, rival.y);
+          if ((canMoveLeft || canMoveRight) && Math.random() < rival.dodgeSkill) {
+            const direction = canMoveLeft && canMoveRight ? (Math.random() > 0.5 ? -1 : 1) : (canMoveLeft ? -1 : 1);
+            rival.lane = clamp(rival.lane + direction, 0, laneCount - 1);
+          }
+        }
+      });
+    }
+
+    function updateCharacters(dt) {
+      if (!state.gameOver) {
+        const speed = state.player.boostTimer > 0 ? state.player.baseSpeed * 2 : state.player.baseSpeed;
+        state.player.progress += speed * dt;
+        state.player.wobble += dt * 4;
+        if (state.player.progress >= finishDistance) {
+          state.gameOver = true;
+          state.result = 'You win!';
+        }
+      }
+
+      if (state.player.boostTimer > 0) {
+        state.player.boostTimer = Math.max(0, state.player.boostTimer - dt);
+      }
+
+      updateRivals(dt);
+    }
+
+    function updateObstacles(dt) {
+      const scrollSpeed = state.worldSpeed + state.player.progress / 1800;
+      state.obstacles.forEach((obs) => {
+        obs.y += scrollSpeed * dt;
+      });
+      state.obstacles = state.obstacles.filter((obs) => obs.y < canvas.height + 50);
+
+      state.pickups.forEach((pickup) => {
+        pickup.y += scrollSpeed * dt;
+        pickup.pulse += dt * 4;
+      });
+      state.pickups = state.pickups.filter((pickup) => pickup.y < canvas.height + 50);
+
+      state.skyline.left.forEach((building) => {
+        building.y += scrollSpeed * dt * 0.28;
+      });
+      state.skyline.right.forEach((building) => {
+        building.y += scrollSpeed * dt * 0.28;
+      });
+
+      state.skyline.left = state.skyline.left.filter((building) => building.y < canvas.height + 180);
+      state.skyline.right = state.skyline.right.filter((building) => building.y < canvas.height + 180);
+
+      while (state.skyline.left.length < 12) {
+        state.skyline.left.push(createBuilding(state.skyline.left.length, true));
+      }
+      while (state.skyline.right.length < 12) {
+        state.skyline.right.push(createBuilding(state.skyline.right.length, false));
+      }
+
+      state.skyline.left.forEach((building) => {
+        if (building.y > canvas.height + 80) {
+          building.y = -80 - Math.random() * 70;
+          building.height = 70 + Math.random() * 120;
+          building.width = 34 + Math.random() * 28;
+          building.color = Math.random() > 0.45 ? '#4d5566' : '#9a694f';
+          building.style = Math.random() > 0.45 ? 'office' : 'apartment';
+        }
+      });
+      state.skyline.right.forEach((building) => {
+        if (building.y > canvas.height + 80) {
+          building.y = -80 - Math.random() * 70;
+          building.height = 70 + Math.random() * 120;
+          building.width = 34 + Math.random() * 28;
+          building.color = Math.random() > 0.45 ? '#4d5566' : '#9a694f';
+          building.style = Math.random() > 0.45 ? 'office' : 'apartment';
+        }
+      });
+    }
+
+    function updateSpawning(dt) {
+      state.spawnTimer -= dt;
+      state.pickupTimer -= dt;
+      if (state.spawnTimer <= 0) {
+        spawnObstacle();
+        state.spawnTimer = Math.max(0.35, 1.15 - state.player.progress / 5500);
+      }
+      if (state.pickupTimer <= 0) {
+        spawnPickup();
+        state.pickupTimer = 2.8 + Math.random() * 2.6;
+      }
+    }
+
+    function checkCollisions() {
+      if (state.gameOver) return;
+      const playerX = getLaneCenter(state.player.lane);
+      const playerYPos = state.player.y;
+
+      for (let i = state.obstacles.length - 1; i >= 0; i -= 1) {
+        const obs = state.obstacles[i];
+        const obsX = getLaneCenter(obs.lane);
+        const obsY = obs.y;
+        if (obs.lane === state.player.lane && Math.abs(obsX - playerX) < 24 && obsY > playerYPos - 40 && obsY < playerYPos + 26) {
+          state.gameOver = true;
+          state.result = 'Crashed.';
+          state.obstacles.splice(i, 1);
+          state.player.alive = false;
+          return;
+        }
+      }
+
+      state.obstacles.forEach((obs, index) => {
+        state.rivals.forEach((rival) => {
+          if (!rival.alive) return;
+          const rivalX = getLaneCenter(rival.lane);
+          if (obs.lane === rival.lane && Math.abs(getLaneCenter(obs.lane) - rivalX) < 24 && obs.y > rival.y - 42 && obs.y < rival.y + 24) {
+            rival.alive = false;
+            state.obstacles.splice(index, 1);
+          }
+        });
+      });
+
+      state.pickups.forEach((pickup, index) => {
+        if (state.player.alive && pickup.lane === state.player.lane && Math.abs(pickup.y - state.player.y) < 34) {
+          state.player.boostTimer = 1.8;
+          state.pickups.splice(index, 1);
+        }
+      });
+    }
+
+    function drawRoad() {
+      ctx.save();
+      const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+      gradient.addColorStop(0, '#1d2533');
+      gradient.addColorStop(1, '#0f1520');
+      ctx.fillStyle = gradient;
+      ctx.fillRect(roadX, 0, roadWidth, canvas.height);
+
+      ctx.strokeStyle = 'rgba(255,255,255,0.28)';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(roadX, 0, roadWidth, canvas.height);
+
+      ctx.strokeStyle = 'rgba(255,255,255,0.42)';
+      ctx.lineWidth = 2;
+      for (let lane = 1; lane < laneCount; lane += 1) {
+        const x = roadX + lane * laneWidth;
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, canvas.height);
+        ctx.stroke();
+      }
+
+      ctx.setLineDash([10, 10]);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+      for (let lane = 0; lane < laneCount; lane += 1) {
+        const x = roadX + lane * laneWidth + laneWidth / 2;
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, canvas.height);
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+
+      ctx.fillStyle = 'rgba(255,255,255,0.08)';
+      ctx.fillRect(roadX, 0, roadWidth, canvas.height);
+      ctx.restore();
+    }
+
+    function drawSkyline() {
+      const topPad = 0;
+      state.skyline.left.forEach((building) => {
+        drawBuilding(building, true, topPad);
+      });
+      state.skyline.right.forEach((building) => {
+        drawBuilding(building, false, topPad);
+      });
+    }
+
+    function drawBuilding(building, leftSide, topPad) {
+      const x = leftSide ? 8 : canvas.width - building.width - 8;
+      const y = building.y;
+      ctx.save();
+      ctx.fillStyle = building.color;
+      ctx.fillRect(x, y, building.width, building.height);
+      ctx.fillStyle = 'rgba(255,255,255,0.12)';
+      ctx.fillRect(x, y, building.width, 8);
+      ctx.strokeStyle = 'rgba(0,0,0,0.2)';
+      ctx.strokeRect(x, y, building.width, building.height);
+
+      if (building.style === 'office') {
+        const colCount = 3;
+        const rowCount = 4;
+        const winW = Math.max(4, building.width / colCount - 3);
+        const winH = Math.max(4, building.height / rowCount - 3);
+        ctx.fillStyle = '#cdd8ef';
+        for (let row = 0; row < rowCount; row += 1) {
+          for (let col = 0; col < colCount; col += 1) {
+            const wx = x + 6 + col * (winW + 3);
+            const wy = y + 10 + row * (winH + 3);
+            ctx.fillRect(wx, wy, winW, winH);
+          }
+        }
+      } else {
+        const winW = Math.max(6, building.width / 2 - 4);
+        const winH = 6;
+        ctx.fillStyle = '#ffe2ba';
+        for (let i = 0; i < 3; i += 1) {
+          const wx = x + 6 + i * (winW + 5);
+          ctx.fillRect(wx, y + 10 + i * 12, winW, winH);
+          ctx.fillRect(wx, y + 40 + i * 10, winW, winH);
+        }
+        ctx.fillStyle = '#65707f';
+        ctx.fillRect(x + 4, y + building.height - 8, building.width - 8, 4);
+      }
+      ctx.restore();
+    }
+
+    function drawProgressBars() {
+      const barY = 16;
+      const labelGap = 24;
+      const width = 100;
+      const height = 6;
+      const items = [{ ...state.player, label: state.player.name }].concat(state.rivals.filter((r) => r.alive || state.gameOver));
+      items.forEach((item, index) => {
+        const x = 18 + (index % 2) * 118;
+        const y = barY + Math.floor(index / 2) * labelGap;
+        ctx.save();
+        ctx.fillStyle = 'rgba(255,255,255,0.18)';
+        ctx.fillRect(x, y, width, height);
+        ctx.fillStyle = item.color;
+        const progress = clamp(item.progress / finishDistance, 0, 1);
+        ctx.fillRect(x, y, width * progress, height);
+        ctx.fillStyle = '#f8fbff';
+        ctx.font = '10px Arial';
+        ctx.fillText(item.name, x, y - 4);
+        ctx.restore();
+      });
+
+      ctx.save();
+      ctx.fillStyle = '#f8fbff';
+      ctx.font = '12px Arial';
+      ctx.fillText('Legend', 18, 62);
+      [
+        { label: 'You', color: '#41dd93' },
+        { label: 'Rex', color: '#ff9f1c' },
+        { label: 'Mira', color: '#4da3ff' },
+        { label: 'Vio', color: '#b36dff' }
+      ].forEach((entry, index) => {
+        const x = 18 + index * 78;
+        const y = 72;
+        ctx.fillStyle = entry.color;
+        ctx.beginPath();
+        ctx.arc(x, y, 5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#f8fbff';
+        ctx.font = '10px Arial';
+        ctx.fillText(entry.label, x + 8, y + 3);
+      });
+      ctx.restore();
+    }
+
+    function drawCharacter(character) {
+      const x = getLaneCenter(character.lane);
+      const y = character.y;
+      ctx.save();
+      if (character === state.player && state.player.boostTimer > 0) {
+        ctx.shadowBlur = 16;
+        ctx.shadowColor = '#4fe3c1';
+      }
+      ctx.translate(x, y);
+      ctx.scale(1, 1);
+      ctx.fillStyle = character.color;
+      ctx.beginPath();
+      ctx.roundRect(-charWidth / 2, -charHeight / 2, charWidth, charHeight, 8);
+      ctx.fill();
+      ctx.fillStyle = '#dff8e7';
+      ctx.beginPath();
+      ctx.arc(0, -8, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function drawObstacles() {
+      state.obstacles.forEach((obs) => {
+        const x = getLaneCenter(obs.lane);
+        const y = obs.y;
+        ctx.save();
+        ctx.translate(x, y);
+        if (obs.type === 'cone') {
+          ctx.fillStyle = obs.color;
+          ctx.beginPath();
+          ctx.moveTo(0, -10);
+          ctx.lineTo(10, 10);
+          ctx.lineTo(-10, 10);
+          ctx.closePath();
+          ctx.fill();
+          ctx.fillStyle = '#4c2a0a';
+          ctx.fillRect(-3, 10, 6, 5);
+        } else if (obs.type === 'barrier') {
+          ctx.fillStyle = obs.color;
+          ctx.fillRect(-12, -8, 24, 16);
+          ctx.fillStyle = '#5c5d60';
+          ctx.fillRect(-12, -8, 24, 4);
+          ctx.fillRect(-12, 4, 24, 4);
+        } else if (obs.type === 'box') {
+          ctx.fillStyle = obs.color;
+          ctx.fillRect(-10, -8, 20, 16);
+          ctx.strokeStyle = '#341d0a';
+          ctx.strokeRect(-10, -8, 20, 16);
+        } else if (obs.type === 'puddle') {
+          ctx.fillStyle = obs.color;
+          ctx.beginPath();
+          ctx.arc(0, 0, 10, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = 'rgba(255,255,255,0.5)';
+          ctx.fillRect(-6, -3, 12, 6);
+        }
+        ctx.restore();
+      });
+    }
+
+    function drawPickups() {
+      state.pickups.forEach((pickup) => {
+        const x = getLaneCenter(pickup.lane);
+        const y = pickup.y + Math.sin(pickup.pulse) * 2;
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.fillStyle = '#19d8cf';
+        ctx.beginPath();
+        ctx.arc(0, 0, 11, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#0e5c58';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(-3, -4);
+        ctx.lineTo(1, -4);
+        ctx.lineTo(-2, 3);
+        ctx.lineTo(3, 3);
+        ctx.lineTo(-1, 8);
+        ctx.lineTo(0, 0);
+        ctx.stroke();
+        ctx.restore();
+      });
+    }
+
+    function drawDistanceCounter() {
+      ctx.save();
+      ctx.fillStyle = 'rgba(7, 12, 22, 0.75)';
+      ctx.fillRect(240, 12, 100, 24);
+      ctx.fillStyle = '#fff';
+      ctx.font = '12px Arial';
+      ctx.fillText(`Dist ${Math.floor(state.player.progress)}m`, 252, 28);
+      ctx.restore();
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      drawSkyline();
+      drawRoad();
+      drawProgressBars();
+      drawDistanceCounter();
+      drawObstacles();
+      drawPickups();
+      drawCharacter(state.player);
+      state.rivals.forEach((rival) => {
+        if (rival.alive) drawCharacter(rival);
+      });
+    }
+
+    function step(timestamp) {
+      if (!state.lastTime) state.lastTime = timestamp;
+      const dt = Math.min(0.032, (timestamp - state.lastTime) / 1000);
+      state.lastTime = timestamp;
+
+      if (!state.gameOver) {
+        updateCharacters(dt);
+        updateSpawning(dt);
+        updateObstacles(dt);
+        checkCollisions();
+      }
+
+      updateHud();
+      draw();
+      requestAnimationFrame(step);
+    }
+
+    window.addEventListener('keydown', (event) => {
+      if (event.code === 'ArrowLeft' || event.code === 'KeyA') {
+        changeLane(-1);
+        event.preventDefault();
+      } else if (event.code === 'ArrowRight' || event.code === 'KeyD') {
+        changeLane(1);
+        event.preventDefault();
+      }
+    });
+
+    canvas.addEventListener('touchstart', (event) => {
+      const touch = event.touches[0];
+      touchStartX = touch.clientX;
+      touchStartY = touch.clientY;
+    }, { passive: true });
+
+    canvas.addEventListener('touchend', (event) => {
+      const touch = event.changedTouches[0];
+      const deltaX = touch.clientX - touchStartX;
+      const deltaY = touch.clientY - touchStartY;
+      if (Math.abs(deltaX) > 35 && Math.abs(deltaX) > Math.abs(deltaY)) {
+        changeLane(deltaX > 0 ? 1 : -1);
+      }
+    }, { passive: true });
+
+    leftBtn.addEventListener('click', () => changeLane(-1));
+    rightBtn.addEventListener('click', () => changeLane(1));
+    restartBtn.addEventListener('click', () => {
+      state = resetGame();
+      updateHud();
+      draw();
+    });
+
+    updateHud();
+    draw();
+    requestAnimationFrame(step);
+  </script>
+</body>
+</html>
